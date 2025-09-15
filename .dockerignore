@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Crawl results (원본 크롤러에서 생성되는 파일들)
+crawl_results/
+*.csv
+# *.json  # stocks.json은 람다에서 필요하므로 주석 처리
+
+# Logs
+*.log
+
+# Docker
+Dockerfile.old
+docker-compose.yml
+
+# README and docs
+README.md
+*.md
+
+# Original crawler (람다용이 아닌 원본)
+naver_finance_info_crawler.py
+# stocks.json  # 람다에서 필요하므로 주석 처리

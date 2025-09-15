@@ -1,0 +1,36 @@
+# 1. 기본 이미지를 Microsoft의 공식 Playwright 이미지로 변경합니다.
+#    (태그는 Python 버전에 맞춰 선택: 예: v1.40.0-jammy)
+#    - Jammy (Ubuntu 22.04 기반) 또는 Focal (Ubuntu 20.04 기반)을 권장합니다.
+#    - https://mcr.microsoft.com/en-us/product/playwright/python/tags 에서 태그 확인 가능
+#FROM mcr.microsoft.com/playwright/python:v1.55.0-jammy
+FROM mcr.microsoft.com/playwright/python:v1.40.0-focal
+
+# 2. 작업 디렉토리 설정
+WORKDIR /var/task
+
+# 3. AWS Lambda Runtime Interface Client 설치
+#    (공식 이미지에는 이미 pip가 설치되어 있음)
+RUN pip install awslambdaric
+
+# 4. requirements.txt 복사 및 설치
+#    Playwright는 이미 설치되어 있으므로 requirements.txt에서 제외해도 됩니다.
+COPY requirements.txt requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 5. 애플리케이션 코드 복사
+COPY stock_crawler_factory.py .
+COPY naver_stock_invest_info_crawler.py .
+COPY naver_stock_invest_index_crawler.py .
+COPY s3_utils.py .
+COPY stocks.json .
+
+# --- Lambda 실행 구성 ---
+
+# 6. ENTRYPOINT 설정: Lambda 런타임 인터페이스 클라이언트(awslambdaric)를 실행합니다.
+#    awslambdaric가 Python 모듈로 실행됩니다.
+ENTRYPOINT ["python", "-m", "awslambdaric"]
+
+# 7. CMD 설정: awslambdaric에 실행할 핸들러 정보를 전달합니다.
+#    형식: "파이썬파일이름.함수이름" (여기서 .py 확장자는 제외합니다.)
+#    팩토리 메서드를 메인 진입점으로 설정
+CMD ["stock_crawler_factory.factory_lambda_handler"]
