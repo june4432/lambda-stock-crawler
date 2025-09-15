@@ -340,3 +340,15 @@ aws lambda update-function-configuration \
 ---
 
 **Made with ❤️ for automated stock data collection**
+
+
+aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin 818263291911.dkr.ecr.ap-northeast-2.amazonaws.com
+
+
+docker build -f Dockerfile.pw -t stock-crawler .
+
+
+docker tag stock-crawler:latest 818263291911.dkr.ecr.ap-northeast-2.amazonaws.com/youngjunlee/test-stock-crawler:latest
+
+
+docker push 818263291911.dkr.ecr.ap-northeast-2.amazonaws.com/youngjunlee/test-stock-crawler:latest
