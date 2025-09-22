@@ -865,10 +865,25 @@ class PlaywrightStockCrawler:
         unique_yyyymm = sorted(df['yyyymm'].unique())
         print(f"📅 발견된 yyyymm: {unique_yyyymm}")
         
+        # 가장 큰 yyyymm 찾기 (분석 데이터용)
+        max_yyyymm = max(unique_yyyymm)
+        print(f"📅 분석 데이터(전년대비/전분기대비)가 포함될 최신 년월: {max_yyyymm}")
+
         # 각 yyyymm별로 데이터 분리하여 저장
         for yyyymm in unique_yyyymm:
             # 해당 yyyymm 데이터만 필터링
-            filtered_df = df[df['yyyymm'] == yyyymm].copy()
+            yyyymm_data = df[df['yyyymm'] == yyyymm].copy()
+
+            # 분석 데이터는 최신 년월에만 포함
+            if yyyymm != max_yyyymm and 'column_type' in yyyymm_data.columns:
+                # 최신 년월이 아니면 분석 데이터 제외
+                filtered_df = yyyymm_data[yyyymm_data['column_type'] != 'analysis_data'].copy()
+                excluded_count = len(yyyymm_data) - len(filtered_df)
+                if excluded_count > 0:
+                    print(f"📊 {yyyymm}: 분석 데이터 {excluded_count}개 제외 (최신 년월 {max_yyyymm}에만 포함)")
+            else:
+                # 최신 년월이거나 column_type 컬럼이 없으면 모든 데이터 포함
+                filtered_df = yyyymm_data.copy()
             
             if not filtered_df.empty:
                 # 파일명 생성
@@ -1079,13 +1094,14 @@ class PlaywrightStockCrawler:
             print(f"⚠️ 데이터 타입 추출 중 오류: {str(e)}")
             return '연결'  # 기본값
     
-    def transform_to_row_format(self, combined_df):
+    def transform_to_row_format(self, combined_df, period_type="연간"):
         """
         컬럼 기반 데이터를 row 기반으로 변환하는 메소드
-        
+
         Args:
             combined_df (pd.DataFrame): 크롤링된 원본 데이터
-            
+            period_type (str): 조회 기간 타입 ("연간" 또는 "분기")
+
         Returns:
             pd.DataFrame: 변환된 데이터
         """
@@ -1098,8 +1114,15 @@ class PlaywrightStockCrawler:
             year_pattern = r'\d{4}/\d{2}'
             year_columns = [col for col in combined_df.columns if re.search(year_pattern, col)]
             
-            # 2. 분석 컬럼들 (전년대비 등)
-            analysis_columns = [col for col in combined_df.columns if any(keyword in col for keyword in ['YoY', '전년대비', '증감률', 'CAGR'])]
+            # 2. 분석 컬럼들 (기간 타입에 따라 분기/연간 구분)
+            if period_type == "분기":
+                # 분기 조회: QoQ, 전분기대비 등 분기 관련 분석 컬럼만
+                analysis_keywords = ['QoQ', '전분기대비', '분기증감률']
+            else:
+                # 연간 조회: YoY, 전년대비 등 연간 관련 분석 컬럼만
+                analysis_keywords = ['YoY', '전년대비', '증감률', 'CAGR']
+
+            analysis_columns = [col for col in combined_df.columns if any(keyword in col for keyword in analysis_keywords)]
             
             # 3. 전체 변환 대상 컬럼
             target_columns = year_columns + analysis_columns
@@ -1131,36 +1154,28 @@ class PlaywrightStockCrawler:
             
             print(f"📅 분석 데이터 매핑 기준: {max_year}/{max_month}")
             
+            # 먼저 연도 컬럼들만 처리 (모든 행에서)
             for _, row in combined_df.iterrows():
-                for target_col in target_columns:
-                    # 컬럼 타입에 따른 처리
-                    if target_col in year_columns:
-                        # 연도 컬럼 처리 - 정규식으로 yyyy/mm 패턴 추출
-                        year_match = re.search(year_pattern, target_col)
-                        if year_match:
-                            year_period = year_match.group()  # "2024/09"
-                            yy, mm = year_period.split('/')
-                        else:
-                            yy, mm = '', ''
-                        data_type = self._extract_data_type_from_column(target_col)
-                        column_type = 'year_data'
-                        # value_type 결정 (E가 있으면 Expected, 없으면 Real)
-                        value_type = 'Expected' if '(E)' in target_col else 'Real'
+                for target_col in year_columns:
+                    # 연도 컬럼 처리 - 정규식으로 yyyy/mm 패턴 추출
+                    year_match = re.search(year_pattern, target_col)
+                    if year_match:
+                        year_period = year_match.group()  # "2024/09"
+                        yy, mm = year_period.split('/')
                     else:
-                        # 분석 컬럼 처리 (전년대비 등) - 가장 큰 연도/월에 매핑
-                        yy = max_year
-                        mm = max_month
-                        data_type = self._extract_data_type_from_column(target_col) if '(' in target_col else 'analysis'
-                        column_type = 'analysis_data'
-                        # 분석 데이터는 모두 Real (실제 계산된 값)
-                        value_type = 'Real'
-                    
+                        yy, mm = '', ''
+                    data_type = self._extract_data_type_from_column(target_col)
+                    # period_type에 따라 column_type 구분
+                    column_type = 'period_data' if period_type == "분기" else 'year_data'
+                    # value_type 결정 (E가 있으면 Expected, 없으면 Real)
+                    value_type = 'Expected' if '(E)' in target_col else 'Real'
+
                     # 값이 비어있지 않은 경우만 추가
                     value = row[target_col]
                     if pd.notna(value) and str(value).strip() != '':
                         # 조회구분 정보 가져오기 (없으면 기본값)
                         inquiry_type = row.get('search_type', '연간')
-                        
+
                         # 기본 행 데이터
                         transformed_row = {
                             'tab': row['tab'],
@@ -1177,7 +1192,7 @@ class PlaywrightStockCrawler:
                             'data_type': data_type,
                             'crawl_time':datetime.now().strftime("%Y-%m-%d %H:%M:%S") #현재시간 추가
                         }
-                        
+
                         # company_code가 있으면 추가 (6자리 문자열로 보장)
                         if 'company_code' in combined_df.columns:
                             company_code = str(row['company_code']).zfill(6)
@@ -1185,22 +1200,82 @@ class PlaywrightStockCrawler:
                         else:
                             # 단일 회사 크롤링인 경우 기본값 설정
                             transformed_row['company_code'] = '004150'
-                        
+
                         # company_name이 있으면 추가
                         if 'company_name' in combined_df.columns:
                             transformed_row['company_name'] = row['company_name']
                         else:
                             # 단일 회사 크롤링인 경우 기본값 설정
                             transformed_row['company_name'] = '한솔홀딩스'
-                        
+
                         # finGubun이 있으면 추가
                         if 'finGubun' in combined_df.columns:
                             transformed_row['finGubun'] = row['finGubun']
                         else:
                             # finGubun이 없는 경우 기본값 설정
                             transformed_row['finGubun'] = 'K-IFRS(연결)'
-                        
+
                         transformed_data.append(transformed_row)
+
+            # 분석 컬럼들은 최신 년월에만 추가 (한 번만)
+            if analysis_columns:
+                print(f"📊 분석 데이터는 최신 년월 {max_year}/{max_month}에만 추가됩니다.")
+                for _, row in combined_df.iterrows():
+                    for target_col in analysis_columns:
+                        # 분석 컬럼 처리 (전년대비 등) - 가장 큰 연도/월에 매핑
+                        yy = max_year
+                        mm = max_month
+                        data_type = self._extract_data_type_from_column(target_col) if '(' in target_col else 'analysis'
+                        column_type = 'analysis_data'
+                        # 분석 데이터는 모두 Real (실제 계산된 값)
+                        value_type = 'Real'
+
+                        # 값이 비어있지 않은 경우만 추가
+                        value = row[target_col]
+                        if pd.notna(value) and str(value).strip() != '':
+                            # 조회구분 정보 가져오기 (없으면 기본값)
+                            inquiry_type = row.get('search_type', '연간')
+
+                            # 기본 행 데이터
+                            transformed_row = {
+                                'tab': row['tab'],
+                                'search_type': inquiry_type,
+                                'id': row['id'],
+                                'parent_id': row['parent_id'],
+                                'item': row['항목'],
+                                'column_name': target_col,  # 원본 컬럼명 추가
+                                'column_type': column_type,  # 컬럼 유형 추가
+                                'yyyy': yy,
+                                'month': mm,
+                                'value': value,
+                                'value_type': value_type,  # Expected/Real 구분
+                                'data_type': data_type,
+                                'crawl_time':datetime.now().strftime("%Y-%m-%d %H:%M:%S") #현재시간 추가
+                            }
+
+                            # company_code가 있으면 추가 (6자리 문자열로 보장)
+                            if 'company_code' in combined_df.columns:
+                                company_code = str(row['company_code']).zfill(6)
+                                transformed_row['company_code'] = company_code
+                            else:
+                                # 단일 회사 크롤링인 경우 기본값 설정
+                                transformed_row['company_code'] = '004150'
+
+                            # company_name이 있으면 추가
+                            if 'company_name' in combined_df.columns:
+                                transformed_row['company_name'] = row['company_name']
+                            else:
+                                # 단일 회사 크롤링인 경우 기본값 설정
+                                transformed_row['company_name'] = '한솔홀딩스'
+
+                            # finGubun이 있으면 추가
+                            if 'finGubun' in combined_df.columns:
+                                transformed_row['finGubun'] = row['finGubun']
+                            else:
+                                # finGubun이 없는 경우 기본값 설정
+                                transformed_row['finGubun'] = 'K-IFRS(연결)'
+
+                            transformed_data.append(transformed_row)
             
             if not transformed_data:
                 print("❌ 변환할 데이터가 없습니다.")
@@ -1409,7 +1484,7 @@ async def crawl_multiple_stocks(stocks_data, output_dir="./crawl_results", perio
         
         # 임시 크롤러 객체 생성 (변환 메소드 사용을 위해)
         temp_crawler = PlaywrightStockCrawler()
-        transformed_df = temp_crawler.transform_to_row_format(combined_df)
+        transformed_df = temp_crawler.transform_to_row_format(combined_df, period_type)
         
         if not transformed_df.empty:
             # yyyymm별로 데이터 분리하여 저장
