@@ -7,7 +7,7 @@ import asyncio
 import pandas as pd
 from playwright.async_api import async_playwright
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import os
 import re
 from s3_utils import upload_file_to_s3, generate_s3_key
@@ -1190,7 +1190,7 @@ class PlaywrightStockCrawler:
                             'value': value,
                             'value_type': value_type,  # Expected/Real 구분
                             'data_type': data_type,
-                            'crawl_time':datetime.now().strftime("%Y-%m-%d %H:%M:%S") #현재시간 추가
+                            'crawl_time': datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S") # KST 시간 추가
                         }
 
                         # company_code가 있으면 추가 (6자리 문자열로 보장)
@@ -1250,7 +1250,7 @@ class PlaywrightStockCrawler:
                                 'value': value,
                                 'value_type': value_type,  # Expected/Real 구분
                                 'data_type': data_type,
-                                'crawl_time':datetime.now().strftime("%Y-%m-%d %H:%M:%S") #현재시간 추가
+                                'crawl_time': datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S") # KST 시간 추가
                             }
 
                             # company_code가 있으면 추가 (6자리 문자열로 보장)
@@ -1396,39 +1396,52 @@ async def crawl_multiple_stocks(stocks_data, output_dir="./crawl_results", perio
     finally:
         await crawler.cleanup()
     
-    # 전체 결과 요약 저장 (DataFrame을 JSON 직렬화 가능한 형태로 변환)
-    json_compatible_results = {}
-    for company_code, company_data in all_results.items():
-        json_compatible_results[company_code] = {
-            'company_name': company_data['company_name'],
-            'company_code': company_data['company_code'],
-            'data': {}
+    # Lambda 환경에서는 요약 파일 저장 생략 (메모리 절약 및 오류 방지)
+    try:
+        # 간단한 요약 정보만 생성 (DataFrame 직렬화 없이)
+        summary_data = {
+            'timestamp': datetime.now(timezone(timedelta(hours=9))).isoformat(),
+            'total_companies': len(stocks_data),
+            'success_count': success_count,
+            'failed_count': len(failed_companies),
+            'failed_companies': failed_companies,
+            'message': f'{success_count}개 성공, {len(failed_companies)}개 실패'
         }
-        
-        # DataFrame을 dict로 변환
-        for tab_name, df in company_data['data'].items():
-            if isinstance(df, pd.DataFrame):
-                # DataFrame을 JSON 직렬화 가능한 형태로 변환
-                df_clean = df.copy()
-                df_clean = df_clean.where(pd.notnull(df_clean), None)
-                json_compatible_results[company_code]['data'][tab_name] = df_clean.astype(str).replace('nan', None).to_dict('records')
-            else:
-                json_compatible_results[company_code]['data'][tab_name] = df
-    
-    summary_data = {
-        'timestamp': datetime.now().isoformat(),
-        'total_companies': len(stocks_data),
-        'success_count': success_count,
-        'failed_count': len(failed_companies),
-        'failed_companies': failed_companies,
-        'results': json_compatible_results
-    }
-    
-    # 전체 결과 요약 JSON 저장 (날짜 접두사 추가)
-    date_prefix = datetime.now().strftime("%Y%m%d")
-    summary_filename = f"{output_dir}/{date_prefix}_crawling_summary.json"
-    with open(summary_filename, 'w', encoding='utf-8') as f:
-        json.dump(summary_data, f, ensure_ascii=False, indent=2)
+
+        # Lambda 환경이 아닌 경우에만 상세 요약 파일 저장
+        if not os.environ.get('AWS_LAMBDA_FUNCTION_NAME'):
+            print("💾 로컬 환경: 상세 요약 파일 생성 중...")
+
+            # DataFrame을 JSON 직렬화 가능한 형태로 변환 (로컬에서만)
+            json_compatible_results = {}
+            for company_code, company_data in all_results.items():
+                json_compatible_results[company_code] = {
+                    'company_name': company_data['company_name'],
+                    'company_code': company_data['company_code'],
+                    'status': company_data.get('status', 'unknown'),
+                    'data_count': len(company_data.get('data', {}))
+                }
+
+            summary_data['results'] = json_compatible_results
+
+            # 날짜 접두사 추가하여 JSON 저장
+            date_prefix = datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d")
+            summary_filename = f"{output_dir}/{date_prefix}_crawling_summary.json"
+            with open(summary_filename, 'w', encoding='utf-8') as f:
+                json.dump(summary_data, f, ensure_ascii=False, indent=2)
+            print(f"💾 요약 파일 저장 완료: {summary_filename}")
+        else:
+            print("☁️ Lambda 환경: 상세 요약 파일 저장 생략")
+
+    except Exception as summary_error:
+        print(f"⚠️ 요약 파일 생성 중 오류 (무시하고 계속 진행): {str(summary_error)}")
+        summary_data = {
+            'timestamp': datetime.now(timezone(timedelta(hours=9))).isoformat(),
+            'total_companies': len(stocks_data),
+            'success_count': success_count,
+            'failed_count': len(failed_companies),
+            'message': '요약 파일 생성 실패하였으나 크롤링은 완료됨'
+        }
     
     # 모든 회사 데이터를 하나의 CSV 파일로 합치기
     combined_csv_data = []
@@ -1518,10 +1531,36 @@ async def crawl_multiple_stocks(stocks_data, output_dir="./crawl_results", perio
 
 
 
+async def crawl_multiple_stocks_direct(stocks_data, output_dir="./crawl_results", period_type="연간", s3_bucket=None, save_local=True):
+    """
+    종목 목록을 직접 받아서 크롤링 (Lambda에서 호출용)
+
+    Args:
+        stocks_data (list): 종목 정보 리스트 [{"code": "004150", "name": "한솔홀딩스"}, ...]
+        output_dir (str): 결과 저장 디렉토리
+        period_type (str): "연간" 또는 "분기"
+        s3_bucket (str): S3 버킷명 (선택사항)
+        save_local (bool): 로컬 저장 여부 (기본값: True)
+    """
+    try:
+        print(f"[DIRECT] {len(stocks_data)}개 회사 정보로 크롤링을 시작합니다.")
+        print(f"[PERIOD] 기간 타입: {period_type}")
+
+        # 다중 크롤링 실행
+        return await crawl_multiple_stocks(stocks_data, output_dir, period_type, s3_bucket, save_local)
+
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] 직접 크롤러 실행 중 오류 발생: {str(e)}")
+        print(f"[ERROR] 상세 오류 정보:")
+        print(traceback.format_exc())
+        raise
+
+
 def run_multiple_crawler(stocks_json_file, output_dir="./crawl_results", period_type="연간", s3_bucket=None, save_local=True):
     """
     JSON 파일에서 주식 목록을 읽어 여러 회사 크롤링
-    
+
     Args:
         stocks_json_file (str): 주식 목록 JSON 파일 경로
         output_dir (str): 결과 저장 디렉토리
@@ -1533,17 +1572,17 @@ def run_multiple_crawler(stocks_json_file, output_dir="./crawl_results", period_
         # JSON 파일 읽기
         with open(stocks_json_file, 'r', encoding='utf-8') as f:
             stocks_data = json.load(f)
-        
+
         print(f"[FILE] {stocks_json_file}에서 {len(stocks_data)}개 회사 정보를 로드했습니다.")
         print(f"[PERIOD] 기간 타입: {period_type}")
-        
+
         # Windows 이벤트 루프 설정
         if os.name == 'nt':
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        
+
         # 다중 크롤링 실행
         asyncio.run(crawl_multiple_stocks(stocks_data, output_dir, period_type, s3_bucket, save_local))
-        
+
     except FileNotFoundError:
         print(f"[ERROR] 파일을 찾을 수 없습니다: {stocks_json_file}")
         print("[INFO] 예시 JSON 파일 형식:")

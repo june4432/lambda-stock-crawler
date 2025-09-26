@@ -6,7 +6,7 @@
 import json
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import boto3
 from dotenv import load_dotenv
 
@@ -102,16 +102,51 @@ def handle_quarter_crawler(event, context):
     분기별 재무정보 크롤러 실행
     """
     print("📈 분기별 재무정보 크롤러 실행")
-    
+
     try:
         # naver_stock_invest_index_crawler 모듈 import
-        from naver_stock_invest_index_crawler import run_multiple_crawler
-        
-        # stocks.json 파일 로드
+        from naver_stock_invest_index_crawler import crawl_multiple_stocks_direct
+
+        # 람다 펑션에서 종목 목록 가져오기
         try:
-            with open('stocks.json', 'r', encoding='utf-8') as f:
-                stocks = json.load(f)
-            print(f"📋 stocks.json에서 {len(stocks)}개 종목 로드 완료")
+            import urllib.request
+            import urllib.error
+
+            # 환경변수에서 람다 URL 가져오기
+            lambda_url = os.environ.get('STOCK_LAMBDA_URL', 'https://rbtvqk5rybgcl63umd5skjnc4i0tqjpl.lambda-url.ap-northeast-2.on.aws/')
+            print(f"📋 람다 펑션에서 종목 목록 가져오기: {lambda_url}")
+
+            with urllib.request.urlopen(lambda_url, timeout=30) as response:
+                response_data = response.read().decode('utf-8')
+
+            print(f"🔍 람다 응답 데이터: {response_data[:500]}...")
+
+            api_response = json.loads(response_data)
+            print(f"🔍 API 응답 구조: {type(api_response)}")
+
+            # API 응답 검증
+            if not api_response.get('success'):
+                error_msg = api_response.get('error', 'Unknown error')
+                raise Exception(f"람다 API 호출 실패: {error_msg}")
+
+            # 데이터 추출
+            raw_stocks = api_response.get('data', [])
+            print(f"📋 람다 API에서 {len(raw_stocks)}개 회사 데이터 수신")
+
+            # stock_code가 null이 아닌 값만 필터링하고 변환
+            stocks = []
+            for stock in raw_stocks:
+                stock_code = stock.get('stock_code')
+                stock_nm = stock.get('stock_nm')
+
+                # stock_code가 있는 경우만 (이 프로젝트용)
+                if stock_code and stock_nm:
+                    stocks.append({
+                        'code': stock_code,
+                        'name': stock_nm
+                    })
+
+            print(f"📋 람다 펑션에서 {len(stocks)}개 유효한 종목 로드 완료")
         except Exception as e:
             return {
                 'statusCode': 500,
@@ -120,27 +155,48 @@ def handle_quarter_crawler(event, context):
                 },
                 'body': json.dumps({
                     'success': False,
-                    'error': f'stocks.json 파일 로드 실패: {str(e)}'
+                    'error': f'람다 펑션에서 종목 목록 로드 실패: {str(e)}'
                 }, ensure_ascii=False, indent=2)
             }
         
         # 분기별 크롤링 실행
         print("🚀 분기별 재무정보 크롤링 시작")
-        
+
         # 임시 출력 디렉토리 생성
         output_dir = "/tmp/crawl_results"
         os.makedirs(output_dir, exist_ok=True)
-        
-        # run_multiple_crawler 실행 (분기) - S3 업로드는 내부에서 처리됨
+
+        # s3_bucket 설정
         s3_bucket = os.environ.get('S3_BUCKET') or event.get('s3_bucket') or 'test-stock-info-bucket'
-        result = run_multiple_crawler("stocks.json", output_dir, "분기", s3_bucket)
-        
-        # S3 업로드 결과는 run_multiple_crawler 내부에서 처리되므로 별도 처리 불필요
+
+        # crawl_multiple_stocks_direct 실행 (분기) - 종목 목록을 직접 전달
+        import asyncio
+        if os.name == 'nt':
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+        crawl_result = asyncio.run(crawl_multiple_stocks_direct(stocks, output_dir, "분기", s3_bucket))
+
+        # 크롤링 결과를 JSON 직렬화 가능한 형태로 요약
+        if crawl_result:
+            summary_result = {
+                "success": True,
+                "total_companies": len(stocks),
+                "message": f"{len(stocks)}개 회사의 분기별 재무정보 크롤링 완료",
+                "output_directory": output_dir,
+                "s3_bucket": s3_bucket
+            }
+        else:
+            summary_result = {
+                "success": False,
+                "message": "크롤링 실행 중 오류 발생"
+            }
+
+        # S3 업로드 결과
         s3_upload_result = {
             "success": True,
-            "message": "S3 업로드는 run_multiple_crawler 내부에서 처리됨"
+            "message": "S3 업로드는 크롤링 함수 내부에서 처리됨"
         }
-        
+
         return {
             'statusCode': 200,
             'headers': {
@@ -149,9 +205,9 @@ def handle_quarter_crawler(event, context):
             'body': json.dumps({
                 'success': True,
                 'crawler_type': 'quarter',
-                'crawl_result': result,
+                'crawl_result': summary_result,
                 's3_upload': s3_upload_result,
-                'crawl_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                'crawl_time': datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")
             }, ensure_ascii=False, indent=2)
         }
         
@@ -173,16 +229,51 @@ def handle_annual_crawler(event, context):
     연간 재무정보 크롤러 실행
     """
     print("📊 연간 재무정보 크롤러 실행")
-    
+
     try:
         # naver_stock_invest_index_crawler 모듈 import
-        from naver_stock_invest_index_crawler import run_multiple_crawler
-        
-        # stocks.json 파일 로드
+        from naver_stock_invest_index_crawler import crawl_multiple_stocks_direct
+
+        # 람다 펑션에서 종목 목록 가져오기
         try:
-            with open('stocks.json', 'r', encoding='utf-8') as f:
-                stocks = json.load(f)
-            print(f"📋 stocks.json에서 {len(stocks)}개 종목 로드 완료")
+            import urllib.request
+            import urllib.error
+
+            # 환경변수에서 람다 URL 가져오기
+            lambda_url = os.environ.get('STOCK_LAMBDA_URL', 'https://rbtvqk5rybgcl63umd5skjnc4i0tqjpl.lambda-url.ap-northeast-2.on.aws/')
+            print(f"📋 람다 펑션에서 종목 목록 가져오기: {lambda_url}")
+
+            with urllib.request.urlopen(lambda_url, timeout=30) as response:
+                response_data = response.read().decode('utf-8')
+
+            print(f"🔍 람다 응답 데이터: {response_data[:500]}...")
+
+            api_response = json.loads(response_data)
+            print(f"🔍 API 응답 구조: {type(api_response)}")
+
+            # API 응답 검증
+            if not api_response.get('success'):
+                error_msg = api_response.get('error', 'Unknown error')
+                raise Exception(f"람다 API 호출 실패: {error_msg}")
+
+            # 데이터 추출
+            raw_stocks = api_response.get('data', [])
+            print(f"📋 람다 API에서 {len(raw_stocks)}개 회사 데이터 수신")
+
+            # stock_code가 null이 아닌 값만 필터링하고 변환
+            stocks = []
+            for stock in raw_stocks:
+                stock_code = stock.get('stock_code')
+                stock_nm = stock.get('stock_nm')
+
+                # stock_code가 있는 경우만 (이 프로젝트용)
+                if stock_code and stock_nm:
+                    stocks.append({
+                        'code': stock_code,
+                        'name': stock_nm
+                    })
+
+            print(f"📋 람다 펑션에서 {len(stocks)}개 유효한 종목 로드 완료")
         except Exception as e:
             return {
                 'statusCode': 500,
@@ -191,27 +282,48 @@ def handle_annual_crawler(event, context):
                 },
                 'body': json.dumps({
                     'success': False,
-                    'error': f'stocks.json 파일 로드 실패: {str(e)}'
+                    'error': f'람다 펑션에서 종목 목록 로드 실패: {str(e)}'
                 }, ensure_ascii=False, indent=2)
             }
         
         # 연간 크롤링 실행
         print("🚀 연간 재무정보 크롤링 시작")
-        
+
         # 임시 출력 디렉토리 생성
         output_dir = "/tmp/crawl_results"
         os.makedirs(output_dir, exist_ok=True)
-        
-        # run_multiple_crawler 실행 (연간) - S3 업로드는 내부에서 처리됨
+
+        # s3_bucket 설정
         s3_bucket = os.environ.get('S3_BUCKET') or event.get('s3_bucket') or 'test-stock-info-bucket'
-        result = run_multiple_crawler("stocks.json", output_dir, "연간", s3_bucket)
-        
-        # S3 업로드 결과는 run_multiple_crawler 내부에서 처리되므로 별도 처리 불필요
+
+        # crawl_multiple_stocks_direct 실행 (연간) - 종목 목록을 직접 전달
+        import asyncio
+        if os.name == 'nt':
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+        crawl_result = asyncio.run(crawl_multiple_stocks_direct(stocks, output_dir, "연간", s3_bucket))
+
+        # 크롤링 결과를 JSON 직렬화 가능한 형태로 요약
+        if crawl_result:
+            summary_result = {
+                "success": True,
+                "total_companies": len(stocks),
+                "message": f"{len(stocks)}개 회사의 연간 재무정보 크롤링 완료",
+                "output_directory": output_dir,
+                "s3_bucket": s3_bucket
+            }
+        else:
+            summary_result = {
+                "success": False,
+                "message": "크롤링 실행 중 오류 발생"
+            }
+
+        # S3 업로드 결과
         s3_upload_result = {
             "success": True,
-            "message": "S3 업로드는 run_multiple_crawler 내부에서 처리됨"
+            "message": "S3 업로드는 크롤링 함수 내부에서 처리됨"
         }
-        
+
         return {
             'statusCode': 200,
             'headers': {
@@ -220,9 +332,9 @@ def handle_annual_crawler(event, context):
             'body': json.dumps({
                 'success': True,
                 'crawler_type': 'annual',
-                'crawl_result': result,
+                'crawl_result': summary_result,
                 's3_upload': s3_upload_result,
-                'crawl_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                'crawl_time': datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")
             }, ensure_ascii=False, indent=2)
         }
         

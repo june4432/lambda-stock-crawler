@@ -6,7 +6,7 @@ Lambda 환경에서 실행되며 결과를 JSON 형태로 반환합니다.
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import re
 from playwright.async_api import async_playwright
 import traceback
@@ -258,7 +258,7 @@ class NaverFinancePERCrawlerForLambda:
             data = {
                 'stock_code': stock_code,
                 'company_name': company_name,
-                'crawl_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'crawl_time': datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S"),
                 'per_eps_data': []
             }
             
@@ -566,7 +566,7 @@ async def run_batch_per_eps_crawler_for_lambda(stocks, headless=True, delay_betw
                 "successful_count": successful_count,
                 "failed_count": failed_count,
                 "success_rate": f"{(successful_count/len(stocks)*100):.1f}%",
-                "crawl_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "crawl_time": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M:%S")
             },
             "results": all_results
         }
@@ -605,11 +605,46 @@ def lambda_handler(event, context):
         dict: HTTP 응답
     """
     try:
-        # stocks.json 파일에서 종목 리스트 로드
+        # 람다 펑션에서 종목 목록 가져오기
         try:
-            with open('stocks.json', 'r', encoding='utf-8') as f:
-                stocks = json.load(f)
-            print(f"📋 stocks.json에서 {len(stocks)}개 종목 로드 완료")
+            import urllib.request
+            import urllib.error
+
+            # 환경변수에서 람다 URL 가져오기
+            lambda_url = os.environ.get('STOCK_LAMBDA_URL', 'https://rbtvqk5rybgcl63umd5skjnc4i0tqjpl.lambda-url.ap-northeast-2.on.aws/')
+            print(f"📋 람다 펑션에서 종목 목록 가져오기: {lambda_url}")
+
+            with urllib.request.urlopen(lambda_url, timeout=30) as response:
+                response_data = response.read().decode('utf-8')
+
+            print(f"🔍 람다 응답 데이터: {response_data[:500]}...")
+
+            api_response = json.loads(response_data)
+            print(f"🔍 API 응답 구조: {type(api_response)}")
+
+            # API 응답 검증
+            if not api_response.get('success'):
+                error_msg = api_response.get('error', 'Unknown error')
+                raise Exception(f"람다 API 호출 실패: {error_msg}")
+
+            # 데이터 추출
+            raw_stocks = api_response.get('data', [])
+            print(f"📋 람다 API에서 {len(raw_stocks)}개 회사 데이터 수신")
+
+            # stock_code가 null이 아닌 값만 필터링하고 변환
+            stocks = []
+            for stock in raw_stocks:
+                stock_code = stock.get('stock_code')
+                stock_nm = stock.get('stock_nm')
+
+                # stock_code가 있는 경우만 (이 프로젝트용)
+                if stock_code and stock_nm:
+                    stocks.append({
+                        'code': stock_code,
+                        'name': stock_nm
+                    })
+
+            print(f"📋 람다 펑션에서 {len(stocks)}개 유효한 종목 로드 완료")
         except Exception as e:
             return {
                 'statusCode': 500,
@@ -618,7 +653,7 @@ def lambda_handler(event, context):
                 },
                 'body': json.dumps({
                     'success': False,
-                    'error': f'stocks.json 파일 로드 실패: {str(e)}'
+                    'error': f'람다 펑션에서 종목 목록 로드 실패: {str(e)}'
                 }, ensure_ascii=False, indent=2)
             }
         
@@ -639,9 +674,9 @@ def lambda_handler(event, context):
                 # S3 설정 (환경변수 우선순위: 환경변수 > 이벤트 > 기본값)
                 bucket_name = os.environ.get('S3_BUCKET') or event.get('s3_bucket') or 'test-stock-info-bucket'
                 
-                # 동적 S3 키 생성 (람다 실행 시간 기준)
-                current_time = datetime.now()
-                s3_key = generate_s3_key("daily", current_time)
+                # 동적 S3 키 생성 (람다 실행 시간 기준, KST)
+                current_time = datetime.now(timezone(timedelta(hours=9)))
+                s3_key = generate_s3_key("daily", current_time.strftime("%Y"), current_time.strftime("%m"), current_time.strftime("%d"))
                 
                 print(f"📤 S3 업로드 준비: s3://{bucket_name}/{s3_key}")
                 
@@ -722,9 +757,9 @@ if __name__ == "__main__":
             # S3 업로드 테스트 (로컬 환경에서는 건너뛰기)
             print("\n📤 S3 업로드 테스트...")
             try:
-                # 동적 S3 키 생성
-                current_time = datetime.now()
-                s3_key = generate_s3_key("daily", current_time)
+                # 동적 S3 키 생성 (KST)
+                current_time = datetime.now(timezone(timedelta(hours=9)))
+                s3_key = generate_s3_key("daily", current_time.strftime("%Y"), current_time.strftime("%m"), current_time.strftime("%d"))
                 bucket_name = 'test-stock-info-bucket'
                 
                 print(f"📍 예상 S3 경로: s3://{bucket_name}/{s3_key}")

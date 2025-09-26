@@ -4,7 +4,7 @@ S3 업로드 공통 유틸리티 함수들
 
 import boto3
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 
 def upload_file_to_s3(file_path, bucket_name, s3_key):
@@ -119,8 +119,8 @@ def generate_s3_key(period_type, data_year=None, data_month=None, data_day=None)
         else:
             mmdd = data_month.zfill(2) + "01"  # 기본값
     else:
-        # 폴백: 현재 날짜 사용
-        current_time = datetime.now()
+        # 폴백: 현재 날짜 사용 (KST)
+        current_time = datetime.now(timezone(timedelta(hours=9)))
         year = current_time.strftime("%Y")
         mm = current_time.strftime("%m")
         mmdd = current_time.strftime("%m%d")
